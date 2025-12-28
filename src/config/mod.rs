@@ -17,6 +17,7 @@ pub struct Config {
     pub trailing_comma: lists::SeparatorTactic,
     pub hard_tabs: bool,
     pub tab_spaces: usize,
+    pub error_on_unformatted: bool,
 }
 
 impl Default for Config {
@@ -31,6 +32,7 @@ impl Default for Config {
             trailing_comma: lists::SeparatorTactic::Vertical,
             hard_tabs: false,
             tab_spaces: 4,
+            error_on_unformatted: false,
         }
     }
 }
@@ -71,8 +73,12 @@ mod test {
     use super::*;
 
     #[test]
-    fn parse_with_error_on_unformatted_field() {
-        // error_on_unformatted is not yet recognized; serde ignores unknown fields
-        let _config: Config = toml::de::from_str("error_on_unformatted = true").unwrap();
+    fn error_on_unformatted() {
+        // Defaults to false
+        assert!(!Config::default().error_on_unformatted);
+
+        // Can be enabled via config
+        let config: Config = toml::de::from_str("error_on_unformatted = true").unwrap();
+        assert!(config.error_on_unformatted);
     }
 }
