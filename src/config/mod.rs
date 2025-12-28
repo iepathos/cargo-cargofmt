@@ -65,3 +65,14 @@ fn find_config(mut path: &Path) -> Option<PathBuf> {
 }
 
 const CONFIG_FILE_NAMES: [&str; 2] = [".rustfmt.toml", "rustfmt.toml"];
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn parse_with_error_on_unformatted_field() {
+        // error_on_unformatted is not yet recognized; serde ignores unknown fields
+        let _config: Config = toml::de::from_str("error_on_unformatted = true").unwrap();
+    }
+}
