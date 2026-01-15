@@ -22,3 +22,12 @@ pub enum UseSmallHeuristics {
     /// Use `max_width` for all width settings.
     Max,
 }
+
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, serde::Deserialize)]
+pub enum IndentStyle {
+    /// Indent using fixed increments (tabs or spaces based on `hard_tabs` setting).
+    #[default]
+    Block,
+    /// Align content with the opening delimiter position using spaces.
+    Visual,
+}

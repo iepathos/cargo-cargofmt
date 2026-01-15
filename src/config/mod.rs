@@ -20,6 +20,7 @@ pub struct Config {
     pub max_width: usize,
     pub array_width: Option<usize>,
     pub use_small_heuristics: options::UseSmallHeuristics,
+    pub indent_style: options::IndentStyle,
 }
 
 impl Config {
@@ -59,6 +60,7 @@ impl Default for Config {
             max_width: 100,
             array_width: None,
             use_small_heuristics: options::UseSmallHeuristics::default(),
+            indent_style: options::IndentStyle::default(),
         }
     }
 }

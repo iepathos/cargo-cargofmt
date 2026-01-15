@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use crate::config::options::IndentStyle;
 use crate::toml::TokenKind;
 use crate::toml::TomlToken;
 
@@ -8,7 +9,10 @@ pub fn normalize_indent(
     tokens: &mut crate::toml::TomlTokens<'_>,
     hard_tabs: bool,
     tab_spaces: usize,
+    indent_style: IndentStyle,
 ) {
+    // IndentStyle::Visual not yet implemented - falls back to Block behavior
+    let _ = indent_style;
     let mut depth = 0;
     let mut indices = crate::toml::TokenIndices::new();
     let mut buffer = PaddingBuffer::new(hard_tabs, tab_spaces);
@@ -96,22 +100,23 @@ impl PaddingBuffer {
     }
 }
 
+/// Counts closing brackets at the start of a line (before any content).
+/// Used to determine alignment for lines that begin with closers like `]` or `]]`.
 fn close_count(tokens: &crate::toml::TomlTokens<'_>, i: usize) -> usize {
-    let token_line_count = tokens.tokens[i..]
+    if i >= tokens.tokens.len() {
+        return 0;
+    }
+
+    // Only count closers that appear before any content (after optional whitespace).
+    // This prevents counting closers that follow content on the same line (e.g., `"sit"]`).
+    tokens.tokens[i..]
         .iter()
         .take_while(|t| {
-            !matches!(
+            matches!(
                 t.kind,
-                TokenKind::Newline
-                    | TokenKind::Comment
-                    | TokenKind::ArrayOpen
-                    | TokenKind::InlineTableOpen
+                TokenKind::Whitespace | TokenKind::ArrayClose | TokenKind::InlineTableClose
             )
         })
-        .count();
-    let end = i + token_line_count + 1;
-    tokens.tokens[i..end]
-        .iter()
         .filter(|t| matches!(t.kind, TokenKind::ArrayClose | TokenKind::InlineTableClose))
         .count()
 }
@@ -122,10 +127,18 @@ mod test {
     use snapbox::str;
     use snapbox::IntoData;
 
+    use crate::config::options::IndentStyle;
+
     #[track_caller]
-    fn valid(input: &str, hard_tabs: bool, tab_spaces: usize, expected: impl IntoData) {
+    fn valid(
+        input: &str,
+        hard_tabs: bool,
+        tab_spaces: usize,
+        indent_style: IndentStyle,
+        expected: impl IntoData,
+    ) {
         let mut tokens = crate::toml::TomlTokens::parse(input);
-        super::normalize_indent(&mut tokens, hard_tabs, tab_spaces);
+        super::normalize_indent(&mut tokens, hard_tabs, tab_spaces, indent_style);
         let actual = tokens.to_string();
 
         assert_data_eq!(&actual, expected);
@@ -145,12 +158,12 @@ mod test {
 
     #[test]
     fn empty_tabs() {
-        valid("", true, 10, str![]);
+        valid("", true, 10, IndentStyle::Block, str![]);
     }
 
     #[test]
     fn empty_spaces() {
-        valid("", false, 10, str![]);
+        valid("", false, 10, IndentStyle::Block, str![]);
     }
 
     #[test]
@@ -188,6 +201,7 @@ g = 11
 ",
             true,
             10,
+            IndentStyle::Block,
             str![[r#"
 
 a = 5
@@ -258,6 +272,7 @@ g = 11
 ",
             false,
             10,
+            IndentStyle::Block,
             str![[r#"
 
 a = 5
@@ -288,6 +303,311 @@ d = [[
 f = 10
 
 g = 11
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn block_from_visual_simple() {
+        // Block style adjusts indentation but preserves structure
+        // (reflow_arrays handles structure decisions based on array_width)
+        valid(
+            r#"
+b = [1,
+     2,
+     3]
+"#,
+            false,
+            4,
+            IndentStyle::Block,
+            str![[r#"
+
+b = [1,
+    2,
+    3]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn block_from_visual_nested() {
+        // Block style adjusts indentation but preserves structure
+        valid(
+            r#"
+c = [[1,
+      2],
+     [3,
+      4]]
+"#,
+            false,
+            4,
+            IndentStyle::Block,
+            str![[r#"
+
+c = [[1,
+        2],
+    [3,
+        4]]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn block_from_visual_with_trailing_comma() {
+        // Block style adjusts indentation but preserves structure
+        valid(
+            r#"
+deps = ["foo",
+        "bar",]
+"#,
+            false,
+            4,
+            IndentStyle::Block,
+            str![[r#"
+
+deps = ["foo",
+    "bar",]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_simple_array() {
+        // Visual style currently delegates to Block behavior
+        valid(
+            r#"
+b = [
+    1,
+    2,
+]
+"#,
+            false,
+            4,
+            IndentStyle::Visual,
+            str![[r#"
+
+b = [
+    1,
+    2,
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_nested_arrays() {
+        // Visual style currently delegates to Block behavior
+        valid(
+            r#"
+c = [
+    [
+        1,
+        2,
+    ]
+]
+"#,
+            false,
+            4,
+            IndentStyle::Visual,
+            str![[r#"
+
+c = [
+    [
+        1,
+        2,
+    ]
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_longer_key() {
+        // Visual style currently delegates to Block behavior
+        valid(
+            r#"
+dependencies = [
+    "foo",
+    "bar",
+]
+"#,
+            false,
+            4,
+            IndentStyle::Visual,
+            str![[r#"
+
+dependencies = [
+    "foo",
+    "bar",
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_ignores_hard_tabs_setting() {
+        // Visual style currently delegates to Block behavior
+        // With hard_tabs=true, currently produces tabs (will use spaces when implemented)
+        valid(
+            r#"
+b = [
+    1,
+    2,
+]
+"#,
+            true,
+            4,
+            IndentStyle::Visual,
+            str![[r#"
+
+b = [
+	1,
+	2,
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_deeply_nested() {
+        // Visual style currently delegates to Block behavior
+        valid(
+            r#"
+matrix = [
+    [
+        [1, 2],
+        [3, 4],
+    ],
+]
+"#,
+            false,
+            4,
+            IndentStyle::Visual,
+            str![[r#"
+
+matrix = [
+    [
+        [1, 2],
+        [3, 4],
+    ],
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_with_comments() {
+        // Visual style currently delegates to Block behavior
+        valid(
+            r#"
+deps = [
+    # first item
+    "foo",
+    # second item
+    "bar",
+]
+"#,
+            false,
+            4,
+            IndentStyle::Visual,
+            str![[r#"
+
+deps = [
+    # first item
+    "foo",
+    # second item
+    "bar",
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_empty_array() {
+        // Visual style currently delegates to Block behavior
+        valid(
+            r#"
+a = []
+b = [
+]
+"#,
+            false,
+            4,
+            IndentStyle::Visual,
+            str![[r#"
+
+a = []
+b = [
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_no_trailing_comma() {
+        // Visual style currently delegates to Block behavior
+        // When implemented, closer should be on same line as last element (rustfmt style)
+        valid(
+            r#"
+deps = [
+    "ipsum",
+    "dolor",
+    "sit"
+]
+"#,
+            false,
+            4,
+            IndentStyle::Visual,
+            str![[r#"
+
+deps = [
+    "ipsum",
+    "dolor",
+    "sit"
+]
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn visual_preserves_table_structure() {
+        // Visual style currently delegates to Block behavior
+        valid(
+            r#"
+[package]
+name = "test"
+deps = [
+    "foo",
+]
+
+[dependencies]
+bar = "1.0"
+"#,
+            false,
+            4,
+            IndentStyle::Visual,
+            str![[r#"
+
+[package]
+name = "test"
+deps = [
+    "foo",
+]
+
+[dependencies]
+bar = "1.0"
 
 "#]],
         );

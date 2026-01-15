@@ -42,7 +42,12 @@ pub fn fmt_manifest(raw_input_text: &str, config: config::Config) -> Option<Stri
         config.blank_lines_upper_bound,
     );
     formatting::adjust_trailing_comma(&mut tokens, config.trailing_comma);
-    formatting::normalize_indent(&mut tokens, config.hard_tabs, config.tab_spaces);
+    formatting::normalize_indent(
+        &mut tokens,
+        config.hard_tabs,
+        config.tab_spaces,
+        config.indent_style,
+    );
 
     let mut formatted = tokens.to_string();
 
