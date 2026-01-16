@@ -11,11 +11,21 @@ pub fn normalize_indent(
     tab_spaces: usize,
     indent_style: IndentStyle,
 ) {
-    // IndentStyle::Visual not yet implemented - falls back to Block behavior
-    let _ = indent_style;
+    match indent_style {
+        IndentStyle::Block => normalize_indent_block(tokens, hard_tabs, tab_spaces),
+        IndentStyle::Visual => normalize_indent_visual(tokens, tab_spaces),
+    }
+}
+
+fn normalize_indent_block(
+    tokens: &mut crate::toml::TomlTokens<'_>,
+    hard_tabs: bool,
+    tab_spaces: usize,
+) {
     let mut depth = 0;
     let mut indices = crate::toml::TokenIndices::new();
     let mut buffer = PaddingBuffer::new(hard_tabs, tab_spaces);
+
     while let Some(i) = indices.next_index(tokens) {
         match tokens.tokens[i].kind {
             TokenKind::StdTableOpen | TokenKind::ArrayTableOpen => {}
@@ -34,35 +44,225 @@ pub fn normalize_indent(
             TokenKind::Whitespace => {}
             TokenKind::Comment => {}
             TokenKind::Newline => {
-                let next_i = i + 1;
-                if let Some(next) = tokens.tokens.get_mut(next_i) {
-                    match (next.kind, depth) {
-                        (TokenKind::Newline, _) => {}
-                        (TokenKind::Whitespace, 0) => {
-                            *next = TomlToken::EMPTY;
-                        }
-                        (TokenKind::Whitespace, _) => {
-                            let close_count = close_count(tokens, next_i);
-                            let ws = buffer.whitespace(depth - close_count);
-                            let mut token = TomlToken::EMPTY;
-                            token.raw = Cow::Owned(ws.to_owned());
-                            tokens.tokens[next_i] = token;
-                        }
-                        (_, 0) => {}
-                        (_, _) => {
-                            let close_count = close_count(tokens, next_i);
-                            let ws = buffer.whitespace(depth - close_count);
-                            let mut token = TomlToken::EMPTY;
-                            token.raw = Cow::Owned(ws.to_owned());
-                            tokens.tokens.insert(next_i, token);
-                        }
-                    }
-                }
+                apply_block_indent(tokens, i + 1, depth, &mut buffer);
             }
             TokenKind::Error => {}
         }
     }
     tokens.trim_empty_whitespace();
+}
+
+fn apply_block_indent(
+    tokens: &mut crate::toml::TomlTokens<'_>,
+    next_i: usize,
+    depth: usize,
+    buffer: &mut PaddingBuffer,
+) {
+    let Some(next) = tokens.tokens.get(next_i) else {
+        return;
+    };
+
+    match (next.kind, depth) {
+        (TokenKind::Newline, _) | (_, 0) if next.kind != TokenKind::Whitespace => {}
+        (TokenKind::Whitespace, 0) => {
+            tokens.tokens[next_i] = TomlToken::EMPTY;
+        }
+        (TokenKind::Whitespace, _) => {
+            let indent_depth = depth - close_count(tokens, next_i);
+            let ws = buffer.whitespace(indent_depth);
+            tokens.tokens[next_i] = make_whitespace_token(ws);
+        }
+        (_, _) => {
+            let indent_depth = depth - close_count(tokens, next_i);
+            let ws = buffer.whitespace(indent_depth);
+            tokens.tokens.insert(next_i, make_whitespace_token(ws));
+        }
+    }
+}
+
+fn make_whitespace_token(ws: &str) -> TomlToken<'static> {
+    let mut token = TomlToken::EMPTY;
+    token.raw = Cow::Owned(ws.to_owned());
+    token
+}
+
+/// Visual style aligns content with the opening delimiter position.
+/// Always uses spaces for alignment regardless of `hard_tabs` setting.
+/// Matches rustfmt behavior:
+/// - First element stays on same line as opener
+/// - Closing bracket on same line as last element (when no trailing comma)
+fn normalize_indent_visual(tokens: &mut crate::toml::TomlTokens<'_>, tab_spaces: usize) {
+    // First pass: collapse newlines after openers and before closers (rustfmt Visual style)
+    collapse_leading_newlines(tokens);
+    collapse_trailing_newlines(tokens);
+
+    // Second pass: apply visual indentation to remaining newlines
+    let mut column: usize = 0;
+    let mut opening_columns: Vec<usize> = Vec::new();
+    let mut indices = crate::toml::TokenIndices::new();
+    let mut buffer = PaddingBuffer::new(false, 1); // Visual always uses spaces
+
+    while let Some(i) = indices.next_index(tokens) {
+        let token = &tokens.tokens[i];
+        match token.kind {
+            TokenKind::ArrayOpen | TokenKind::InlineTableOpen => {
+                column += token.raw.len();
+                opening_columns.push(column);
+            }
+            TokenKind::ArrayClose | TokenKind::InlineTableClose => {
+                column += token.raw.len();
+                opening_columns.pop();
+            }
+            TokenKind::Whitespace => {
+                column += calculate_column_width(&token.raw, column, tab_spaces);
+            }
+            TokenKind::Newline => {
+                column = 0;
+                let next_i = i + 1;
+                let effective_column = calculate_visual_indent(&opening_columns, tokens, next_i);
+                apply_visual_indent(tokens, next_i, effective_column, &mut buffer);
+            }
+            _ => {
+                column += token.raw.len();
+            }
+        }
+    }
+    tokens.trim_empty_whitespace();
+}
+
+/// Removes newlines (and following whitespace) immediately after array/inline table openers.
+/// This brings the first element onto the same line as the opener (rustfmt Visual style).
+fn collapse_leading_newlines(tokens: &mut crate::toml::TomlTokens<'_>) {
+    let mut i = 0;
+    while i < tokens.tokens.len() {
+        if matches!(
+            tokens.tokens[i].kind,
+            TokenKind::ArrayOpen | TokenKind::InlineTableOpen
+        ) {
+            // Look ahead: remove newline and whitespace after opener
+            let mut j = i + 1;
+            while j < tokens.tokens.len() {
+                match tokens.tokens[j].kind {
+                    TokenKind::Newline | TokenKind::Whitespace => {
+                        tokens.tokens[j] = TomlToken::EMPTY;
+                        j += 1;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Removes newlines (and preceding whitespace) immediately before array/inline table closers.
+/// This puts the closer on the same line as the last element (rustfmt Visual style).
+fn collapse_trailing_newlines(tokens: &mut crate::toml::TomlTokens<'_>) {
+    for i in 0..tokens.tokens.len() {
+        let is_closer = matches!(
+            tokens.tokens[i].kind,
+            TokenKind::ArrayClose | TokenKind::InlineTableClose
+        );
+        if is_closer {
+            if let Some(collapse_start) = find_collapsible_newline(tokens, i) {
+                for k in collapse_start..i {
+                    tokens.tokens[k] = TomlToken::EMPTY;
+                }
+            }
+        }
+    }
+}
+
+/// Finds the start index of a collapsible sequence before a closer.
+/// Returns Some(index) if there's a newline before the closer, None otherwise.
+/// In Visual style, also removes trailing commas when collapsing (matches rustfmt).
+fn find_collapsible_newline(
+    tokens: &crate::toml::TomlTokens<'_>,
+    closer_i: usize,
+) -> Option<usize> {
+    let mut j = closer_i.saturating_sub(1);
+    let mut found_newline = false;
+
+    while j > 0 {
+        match tokens.tokens[j].kind {
+            TokenKind::Newline => {
+                found_newline = true;
+                j = j.saturating_sub(1);
+            }
+            TokenKind::Whitespace | TokenKind::ValueSep => {
+                j = j.saturating_sub(1);
+            }
+            _ => break,
+        }
+    }
+
+    // Return position after the content (j+1) to include ValueSep in collapse range
+    if found_newline {
+        Some(j + 1)
+    } else {
+        None
+    }
+}
+
+fn calculate_visual_indent(
+    opening_columns: &[usize],
+    tokens: &crate::toml::TomlTokens<'_>,
+    next_i: usize,
+) -> usize {
+    let closes = close_count(tokens, next_i);
+
+    if closes > 0 {
+        // Align with the position OF the innermost bracket being closed (first closer on line).
+        // opening_columns stores positions AFTER the opener, so subtract 1.
+        // Multiple closers on the same line (e.g., `]]`) will be adjacent after the first.
+        opening_columns
+            .last()
+            .map(|&col| col.saturating_sub(1))
+            .unwrap_or(0)
+    } else {
+        // Align content with current nesting level (position after the opener)
+        opening_columns.last().copied().unwrap_or(0)
+    }
+}
+
+fn apply_visual_indent(
+    tokens: &mut crate::toml::TomlTokens<'_>,
+    next_i: usize,
+    column: usize,
+    buffer: &mut PaddingBuffer,
+) {
+    let Some(next) = tokens.tokens.get(next_i) else {
+        return;
+    };
+
+    let ws = buffer.whitespace(column);
+
+    match (next.kind, column) {
+        (TokenKind::Newline, _) | (_, 0) if next.kind != TokenKind::Whitespace => {}
+        (TokenKind::Whitespace, 0) => {
+            tokens.tokens[next_i] = TomlToken::EMPTY;
+        }
+        (TokenKind::Whitespace, _) => {
+            tokens.tokens[next_i] = make_whitespace_token(ws);
+        }
+        (_, _) => {
+            tokens.tokens.insert(next_i, make_whitespace_token(ws));
+        }
+    }
+}
+
+/// Calculates the visual column width of whitespace, handling tabs
+fn calculate_column_width(raw: &str, current_column: usize, tab_spaces: usize) -> usize {
+    raw.chars()
+        .fold((0, current_column), |(width, col), c| {
+            if c == '\t' {
+                let spaces_to_next_tab = tab_spaces - (col % tab_spaces);
+                (width + spaces_to_next_tab, col + spaces_to_next_tab)
+            } else {
+                (width + 1, col + 1)
+            }
+        })
+        .0
 }
 
 struct PaddingBuffer {
@@ -377,7 +577,8 @@ deps = ["foo",
 
     #[test]
     fn visual_simple_array() {
-        // Visual style currently delegates to Block behavior
+        // Visual style: first element on same line, subsequent elements align
+        // Trailing comma is removed (matches rustfmt)
         valid(
             r#"
 b = [
@@ -390,10 +591,8 @@ b = [
             IndentStyle::Visual,
             str![[r#"
 
-b = [
-    1,
-    2,
-]
+b = [1,
+     2]
 
 "#]],
         );
@@ -401,7 +600,8 @@ b = [
 
     #[test]
     fn visual_nested_arrays() {
-        // Visual style currently delegates to Block behavior
+        // Visual style: first element on same line, nested arrays align
+        // Trailing commas are removed (matches rustfmt)
         valid(
             r#"
 c = [
@@ -416,12 +616,8 @@ c = [
             IndentStyle::Visual,
             str![[r#"
 
-c = [
-    [
-        1,
-        2,
-    ]
-]
+c = [[1,
+      2]]
 
 "#]],
         );
@@ -429,7 +625,8 @@ c = [
 
     #[test]
     fn visual_longer_key() {
-        // Visual style currently delegates to Block behavior
+        // Visual style: first element on same line, aligns at column 16
+        // Trailing comma is removed (matches rustfmt)
         valid(
             r#"
 dependencies = [
@@ -442,10 +639,8 @@ dependencies = [
             IndentStyle::Visual,
             str![[r#"
 
-dependencies = [
-    "foo",
-    "bar",
-]
+dependencies = ["foo",
+                "bar"]
 
 "#]],
         );
@@ -453,8 +648,8 @@ dependencies = [
 
     #[test]
     fn visual_ignores_hard_tabs_setting() {
-        // Visual style currently delegates to Block behavior
-        // With hard_tabs=true, currently produces tabs (will use spaces when implemented)
+        // Visual style always uses spaces for alignment regardless of hard_tabs setting
+        // Trailing comma is removed (matches rustfmt)
         valid(
             r#"
 b = [
@@ -467,10 +662,8 @@ b = [
             IndentStyle::Visual,
             str![[r#"
 
-b = [
-	1,
-	2,
-]
+b = [1,
+     2]
 
 "#]],
         );
@@ -478,7 +671,8 @@ b = [
 
     #[test]
     fn visual_deeply_nested() {
-        // Visual style currently delegates to Block behavior
+        // Visual style: first element on same line at each nesting level
+        // Trailing commas are removed (matches rustfmt)
         valid(
             r#"
 matrix = [
@@ -493,12 +687,8 @@ matrix = [
             IndentStyle::Visual,
             str![[r#"
 
-matrix = [
-    [
-        [1, 2],
-        [3, 4],
-    ],
-]
+matrix = [[[1, 2],
+           [3, 4]]]
 
 "#]],
         );
@@ -506,7 +696,8 @@ matrix = [
 
     #[test]
     fn visual_with_comments() {
-        // Visual style currently delegates to Block behavior
+        // Visual style: comment becomes first element on same line
+        // Trailing comma is removed (matches rustfmt)
         valid(
             r#"
 deps = [
@@ -521,12 +712,10 @@ deps = [
             IndentStyle::Visual,
             str![[r#"
 
-deps = [
-    # first item
-    "foo",
-    # second item
-    "bar",
-]
+deps = [# first item
+        "foo",
+        # second item
+        "bar"]
 
 "#]],
         );
@@ -534,7 +723,7 @@ deps = [
 
     #[test]
     fn visual_empty_array() {
-        // Visual style currently delegates to Block behavior
+        // Visual style: empty arrays collapse to single line
         valid(
             r#"
 a = []
@@ -547,8 +736,7 @@ b = [
             str![[r#"
 
 a = []
-b = [
-]
+b = []
 
 "#]],
         );
@@ -556,8 +744,8 @@ b = [
 
     #[test]
     fn visual_no_trailing_comma() {
-        // Visual style currently delegates to Block behavior
-        // When implemented, closer should be on same line as last element (rustfmt style)
+        // Visual style: without trailing comma, closer on same line as last element
+        // Matches rustfmt Visual style: vec!["ipsum", "dolor", "sit"];
         valid(
             r#"
 deps = [
@@ -571,11 +759,9 @@ deps = [
             IndentStyle::Visual,
             str![[r#"
 
-deps = [
-    "ipsum",
-    "dolor",
-    "sit"
-]
+deps = ["ipsum",
+        "dolor",
+        "sit"]
 
 "#]],
         );
@@ -583,7 +769,8 @@ deps = [
 
     #[test]
     fn visual_preserves_table_structure() {
-        // Visual style currently delegates to Block behavior
+        // Visual style: first element on same line, preserves table structure
+        // Trailing comma is removed (matches rustfmt)
         valid(
             r#"
 [package]
@@ -602,9 +789,7 @@ bar = "1.0"
 
 [package]
 name = "test"
-deps = [
-    "foo",
-]
+deps = ["foo"]
 
 [dependencies]
 bar = "1.0"
